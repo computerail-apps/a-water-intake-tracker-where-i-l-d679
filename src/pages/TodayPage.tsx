@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useAppData } from '@/lib/data';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/lib/ui/Card';
 import { Button } from '@/lib/ui/Button';
 import { Input } from '@/lib/ui/Input';
@@ -9,28 +8,15 @@ import { CenteredSpinner } from '@/lib/ui/Spinner';
 import { Alert, AlertTitle, AlertDescription } from '@/lib/ui/Alert';
 import { ProgressRing } from '@/components/ProgressRing';
 import { Plus, Undo2, Pencil, Droplets } from 'lucide-react';
-
-interface WaterLog {
-  id: string;
-  logged_at: string;
-  glasses: number;
-}
-
-interface Goal {
-  daily_glasses: number;
-}
-
-function todayLogsMock(): WaterLog[] {
-  const now = new Date();
-  const entries: WaterLog[] = [];
-  const times = [7, 9, 11, 13.5, 16];
-  times.forEach((hourOffset, idx) => {
-    const d = new Date(now);
-    d.setHours(Math.floor(hourOffset), (hourOffset % 1) * 60, 0, 0);
-    entries.push({ id: `log-${idx}`, logged_at: d.toISOString(), glasses: 1 });
-  });
-  return entries;
-}
+import {
+  fetchTodayLogs,
+  fetchGoal,
+  insertGlass,
+  undoLastGlass,
+  saveGoal,
+  type WaterLog,
+  type Goal,
+} from '@/lib/water';
 
 export function TodayPage() {
   const qc = useQueryClient();
@@ -42,12 +28,9 @@ export function TodayPage() {
     isLoading: logsLoading,
     error: logsError,
     refetch: refetchLogs,
-  } = useAppData<WaterLog[]>({
-    key: ['water_logs', 'today'],
-    mock: todayLogsMock(),
-    fetchLive: async () => {
-      throw new Error('not wired yet');
-    },
+  } = useQuery<WaterLog[]>({
+    queryKey: ['water_logs', 'today'],
+    queryFn: fetchTodayLogs,
   });
 
   const {
@@ -55,11 +38,26 @@ export function TodayPage() {
     isLoading: goalLoading,
     error: goalError,
     refetch: refetchGoal,
-  } = useAppData<Goal>({
-    key: ['goals', 'current'],
-    mock: { daily_glasses: 8 },
-    fetchLive: async () => {
-      throw new Error('not wired yet');
+  } = useQuery<Goal>({
+    queryKey: ['goals', 'current'],
+    queryFn: fetchGoal,
+  });
+
+  const addGlass = useMutation({
+    mutationFn: insertGlass,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['water_logs'] }),
+  });
+
+  const undoGlass = useMutation({
+    mutationFn: undoLastGlass,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['water_logs'] }),
+  });
+
+  const updateGoal = useMutation({
+    mutationFn: (value: number) => saveGoal(value),
+    onSuccess: (data) => {
+      qc.setQueryData(['goals', 'current'], data);
+      setEditingGoal(false);
     },
   });
 
@@ -69,30 +67,13 @@ export function TodayPage() {
   const totalGlasses = (logs ?? []).reduce((sum, l) => sum + l.glasses, 0);
   const dailyGoal = goal?.daily_glasses ?? 8;
 
-  function handleAddGlass() {
-    // Optimistic mock update: push directly into the query cache.
-    qc.setQueryData<WaterLog[]>(['water_logs', 'today'], (prev) => {
-      const next = prev ? [...prev] : [];
-      next.push({ id: `log-${Date.now()}`, logged_at: new Date().toISOString(), glasses: 1 });
-      return next;
-    });
-  }
-
-  function handleUndo() {
-    qc.setQueryData<WaterLog[]>(['water_logs', 'today'], (prev) => {
-      if (!prev || prev.length === 0) return prev;
-      const next = [...prev];
-      next.pop();
-      return next;
-    });
-  }
-
   function handleSaveGoal() {
     const parsed = parseInt(goalDraft, 10);
     if (!Number.isNaN(parsed) && parsed > 0) {
-      qc.setQueryData<Goal>(['goals', 'current'], { daily_glasses: parsed });
+      updateGoal.mutate(parsed);
+    } else {
+      setEditingGoal(false);
     }
-    setEditingGoal(false);
   }
 
   if (isLoading) {
@@ -135,15 +116,20 @@ export function TodayPage() {
         <CardContent className="flex flex-col items-center gap-6 py-8">
           <ProgressRing value={totalGlasses} max={dailyGoal} />
           <div className="flex w-full flex-col items-center gap-3 sm:flex-row sm:justify-center">
-            <Button size="lg" onClick={handleAddGlass} className="w-full sm:w-auto">
+            <Button
+              size="lg"
+              onClick={() => addGlass.mutate()}
+              disabled={addGlass.isPending}
+              className="w-full sm:w-auto"
+            >
               <Plus size={16} />
               +1 glass
             </Button>
             <Button
               size="lg"
               variant="outline"
-              onClick={handleUndo}
-              disabled={totalGlasses === 0}
+              onClick={() => undoGlass.mutate()}
+              disabled={totalGlasses === 0 || undoGlass.isPending}
               className="w-full sm:w-auto"
             >
               <Undo2 size={16} />
@@ -161,7 +147,7 @@ export function TodayPage() {
                 onChange={(e) => setGoalDraft(e.target.value)}
                 className="max-w-[100px]"
               />
-              <Button size="sm" onClick={handleSaveGoal}>
+              <Button size="sm" onClick={handleSaveGoal} disabled={updateGoal.isPending}>
                 Save
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setEditingGoal(false)}>
